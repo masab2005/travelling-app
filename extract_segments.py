@@ -188,6 +188,27 @@ def is_distribution_entry(text):
             return True
     return False
 
+def is_fragment_or_header(text):
+    """
+    Detects table column header bleeds, standalone section subheadings,
+    map captions, and leaked distribution list fragments that lack
+    actual hazard or forecast descriptions.
+    """
+    t = text.strip()
+    # 1. Bullet bleeds (e.g. '• Abbottabad AJ&K And ICT', '• Bahawalpur AJ&K, GB & ICT KP')
+    if re.match(r'^[•\ufffd\uf0d8\u27a2\*\-o]\s*[A-Za-z\.\s,&/]+$', t) and len(t) < 60:
+        return True
+    # 2. Subheading bleeds (e.g. 'b. Balochistan, KP, GB and State of AJ&K')
+    if re.match(r'^[a-z]\.\s*(?:Punjab|KP|KPK|Balochistan|GB|AJ&K|State\s+of\s+AJ&K|ICT|Sindh|Murree|Gall?iy?at|Khyber\s*[-–]?\s*Pakhtunkhwa|Gilgit\s*[-–]?\s*Baltistan|Kashmir|,|\s|and|&|\.)+$', t, re.IGNORECASE):
+        return True
+    # 3. Map captions
+    if 'map outlining' in t.lower() or 'flood affected areas of' in t.lower() or 'map below' in t.lower():
+        return True
+    # 4. Leaked distribution list lines
+    if 'chief sec' in t.lower() or 'distribution list' in t.lower():
+        return True
+    return False
+
 def get_weak_label_hint(text):
     """
     Assigns rule-based weak label hint (0=routine, 1=caution/disruption, 2=restriction/blockage).
@@ -554,7 +575,7 @@ def process_single_pdf(fpath):
         b_clean = ' '.join(block.split())
         if len(b_clean) < 25:
             continue
-        if is_gov_directive(b_clean) or is_distribution_entry(b_clean):
+        if is_gov_directive(b_clean) or is_distribution_entry(b_clean) or is_fragment_or_header(b_clean):
             continue
         if 'DISTRIBUTION LIST' in b_clean or 'Director (Response)' in b_clean:
             continue
@@ -745,6 +766,33 @@ def update_canonical_sheet(all_segments, canonical_csv_path='labeling_canonical.
             'annotator_2_label': ann2,
             'label_notes': notes
         })
+
+    # Ensure exactly 130 clean rows in the Kappa sample (stratified by weak_label_hint)
+    current_kappa = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() == 'true']
+    if len(current_kappa) < 130:
+        import random
+        random.seed(42)
+        needed = 130 - len(current_kappa)
+        eligible = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() != 'true']
+        by_hint = defaultdict(list)
+        for r in eligible:
+            by_hint[r['weak_label_hint']].append(r)
+        for h, items in sorted(by_hint.items()):
+            take = min(len(items), round(needed * (len(items) / len(eligible))))
+            sample = random.sample(items, take)
+            for s in sample:
+                s['is_in_kappa_sample'] = 'True'
+        # Final adjustment if rounding differed
+        now_kappa = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() == 'true']
+        if len(now_kappa) < 130:
+            remaining_eligible = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() != 'true']
+            for extra in random.sample(remaining_eligible, 130 - len(now_kappa)):
+                extra['is_in_kappa_sample'] = 'True'
+        elif len(now_kappa) > 130:
+            excess = len(now_kappa) - 130
+            newly_added = [r for r in now_kappa if r['canonical_segment_id'] not in set(k['canonical_segment_id'] for k in current_kappa)]
+            for drop in random.sample(newly_added, excess):
+                drop['is_in_kappa_sample'] = 'False'
 
     fieldnames = [
         'canonical_segment_id',
