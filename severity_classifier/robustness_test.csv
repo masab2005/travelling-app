@@ -1,0 +1,31 @@
+case_id,group,segment_text,expected_label,needs_team_review,reason,predicted_label,class2_probability,correct
+R01,negation,No landslide is expected in the upper valleys during the forecast period.,1,needs_team_review,Guide tricky case: do not upgrade a negated hazard without clear impact.,2,0.952680,0
+R02,negation,The possibility of a landslide cannot be ruled out in Dir and Swat.,2,,Guide tricky case 1: hedged landslide remains class 2.,2,0.989334,1
+R03,negation,"Heavy rain is expected, but no flooding or road impact is forecast.",1,,Guide: plain weather without flood or road impact is class 1.,2,0.804133,0
+R04,negation,A flash flood may develop in vulnerable parts of Chitral after intense rainfall.,2,,Guide: flash flood is a direct travel hazard.,2,0.970295,1
+R05,negation,Snowfall may cause slippery roads and temporary blockage near Naran.,2,,Guide: road impact is class 2.,2,0.975769,1
+R06,hedged_hazards,Rain and thunderstorms are likely in Swat and Dir.,1,,Guide: weather only is class 1.,1,0.194072,1
+R07,hedged_hazards,"Water levels will rise in rivers due to snowmelt, with no flood warning.",1,,Guide tricky case 2: rising water alone is class 1.,2,0.842476,0
+R08,hedged_hazards,A GLOF may damage bridges and isolate communities in Hunza.,2,,Guide: GLOF and travel impact are class 2.,2,0.952190,1
+R09,hedged_hazards,Strong winds may damage crops in upper Punjab.,1,,Guide tricky case 3: crop damage alone is class 1.,1,0.010084,1
+R10,hedged_hazards,A rockfall could block the mountain road to Skardu.,2,,Guide: rockfall and road blockage are class 2.,2,0.964847,1
+R11,without_usual_keywords,Tourists should remain cautious during the forecast period.,1,,Guide tricky case 4: caution advice alone is class 1.,2,0.649425,0
+R12,without_usual_keywords,A mudslide is possible near the only access road to Kaghan.,2,,Guide: mudslide and road access impact are class 2.,2,0.905254,1
+R13,without_usual_keywords,Cold and dry conditions are expected across Gilgit-Baltistan.,1,,Guide: weather only is class 1.,1,0.079856,1
+R14,without_usual_keywords,Flooding may affect low-lying roads in Neelum Valley.,2,,Guide: flooding and roads are class 2.,2,0.976325,1
+R15,without_usual_keywords,Occasional hail and gusty winds are expected in Murree.,1,,Guide: plain weather is class 1.,1,0.182738,1
+R16,plain_weather,"There is little chance of an avalanche, and roads remain open.",1,needs_team_review,Guide: no actual hazard is forecast; wording is deliberately borderline.,2,0.921480,0
+R17,plain_weather,An avalanche may close passes connecting Chitral and Dir.,2,,Guide: avalanche and closure are class 2.,2,0.723060,1
+R18,plain_weather,"Rain may be heavy at times, with no expected disruption.",1,,Guide: heavy rain without impact remains class 1.,1,0.348635,1
+R19,plain_weather,A flash flood warning is issued for the route into Swat.,2,,Guide: flash flood warning is class 2.,2,0.998771,1
+R20,plain_weather,Temperatures will fall below normal over the mountains.,1,,Guide: temperature change alone is class 1.,1,0.216915,1
+R21,guide_tricky_cases,Landslides are possible but no specific road or settlement is named.,2,needs_team_review,"Guide: any landslide warning is class 2, but review is useful.",2,0.993818,1
+R22,guide_tricky_cases,Thunderstorms could reduce visibility for drivers in Murree.,1,needs_team_review,Guide: visibility wording is not explicitly a road closure or disruption.,1,0.420360,1
+R23,guide_tricky_cases,A bridge may be washed away by flooding in Chitral.,2,,Guide: flood and infrastructure/travel impact are class 2.,2,0.543598,1
+R24,guide_tricky_cases,Snow showers are expected over passes with no road effects mentioned.,1,,Guide: snow alone is class 1.,2,0.545045,0
+R25,guide_tricky_cases,Runoff may trigger flash flooding in mountain nullahs.,2,,Guide: flash flooding is class 2.,2,0.987823,1
+R26,mixed_boundary_cases,Cloudy weather and light rain are expected in Hunza.,1,,Guide: weather only is class 1.,1,0.088992,1
+R27,mixed_boundary_cases,A boulder fall may obstruct the highway near Abbottabad.,2,,Guide: rockfall and obstruction are class 2.,2,0.939820,1
+R28,mixed_boundary_cases,The advisory recommends caution because of changing weather.,1,,Guide: caution advice alone is class 1.,2,0.867245,0
+R29,mixed_boundary_cases,Floodwaters could isolate villages and cut the tourist route.,2,,Guide: flooding and route impact are class 2.,2,0.981831,1
+R30,mixed_boundary_cases,"Hail may damage vehicles parked outdoors, but roads remain usable.",1,needs_team_review,Guide: damage without road impact is class 1.,2,0.880860,0

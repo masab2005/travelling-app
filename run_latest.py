@@ -1,13 +1,15 @@
-"""Download the newest NDMA advisory PDF, then run the existing extractor."""
+"""Download and incrementally process the newest NDMA advisory PDF."""
 
 from __future__ import annotations
 
 import hashlib
+import csv
 import html.parser
 import os
 import re
 import subprocess
 import sys
+import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -95,37 +97,53 @@ def sha256(data: bytes) -> str:
 
 
 def find_existing_copy(project_dir: Path, digest: str) -> Path | None:
-    for folder_name in ("AdvisoryPDFs", "remainingPDFs"):
-        folder = project_dir / folder_name
-        if not folder.is_dir():
+    folder = project_dir / "AdvisoryPDFs"
+    if not folder.is_dir():
+        return None
+    for path in folder.glob("*.pdf"):
+        try:
+            file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
             continue
-        for path in folder.glob("*.pdf"):
-            try:
-                file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                continue
-            if file_hash == digest:
-                return path
+        if file_hash == digest:
+            return path
     return None
 
 
-def save_latest_pdf(project_dir: Path, url: str, content: bytes) -> Path:
-    digest = sha256(content)
-    existing = find_existing_copy(project_dir, digest)
-    if existing:
-        print(f"Latest advisory is already present: {existing.relative_to(project_dir)}")
-        return existing
-
-    output_dir = project_dir / "remainingPDFs"
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _safe_pdf_name(url: str) -> str:
     url_name = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", url_name).strip("._")
     if not safe_name.lower().endswith(".pdf"):
         safe_name = "latest_ndma_advisory.pdf"
+    return safe_name
 
-    destination = output_dir / safe_name
-    if destination.exists():
-        destination = output_dir / f"{Path(safe_name).stem}_{digest[:10]}.pdf"
+
+def _available_destination(directory: Path, safe_name: str, digest: str) -> Path:
+    destination = directory / safe_name
+    if not destination.exists():
+        return destination
+    stem = Path(safe_name).stem
+    suffix = Path(safe_name).suffix
+    candidate = directory / f"{stem}_{digest[:10]}{suffix}"
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}_{digest[:10]}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def save_latest_pdf(project_dir: Path, url: str, content: bytes) -> tuple[Path, str]:
+    digest = sha256(content)
+    existing = find_existing_copy(project_dir, digest)
+    if existing:
+        print(f"Latest advisory is already present: {existing.relative_to(project_dir)}")
+        return existing, digest
+
+    output_dir = project_dir / "AdvisoryPDFs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_pdf_name(url)
+
+    destination = _available_destination(output_dir, safe_name, digest)
     temporary = destination.with_suffix(destination.suffix + ".part")
     try:
         with temporary.open("wb") as pdf_file:
@@ -135,7 +153,64 @@ def save_latest_pdf(project_dir: Path, url: str, content: bytes) -> Path:
         if temporary.exists():
             temporary.unlink()
     print(f"Downloaded latest advisory: {destination.relative_to(project_dir)}")
-    return destination
+    return destination, digest
+
+
+def _load_processing_state(project_dir: Path) -> dict[str, dict[str, str]]:
+    state_path = project_dir / ".ndma_processing.json"
+    try:
+        with state_path.open(encoding="utf-8") as state_file:
+            state = json.load(state_file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Could not read processing state: {error}") from error
+    return state if isinstance(state, dict) else {}
+
+
+def _save_processing_state(project_dir: Path, state: dict[str, dict[str, str]]) -> None:
+    state_path = project_dir / ".ndma_processing.json"
+    temporary = state_path.with_suffix(".json.part")
+    try:
+        with temporary.open("w", encoding="utf-8") as state_file:
+            json.dump(state, state_file, indent=2, sort_keys=True)
+        os.replace(temporary, state_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def mark_processing(project_dir: Path, digest: str, filename: str, status: str) -> None:
+    state = _load_processing_state(project_dir)
+    state[digest] = {"filename": filename, "status": status}
+    _save_processing_state(project_dir, state)
+
+
+def was_processed(project_dir: Path, pdf_path: Path, digest: str) -> bool:
+    state = _load_processing_state(project_dir)
+    if state.get(digest, {}).get("status") == "processed":
+        return True
+
+    report_path = project_dir / "run_report.csv"
+    if not report_path.is_file():
+        return False
+    try:
+        with report_path.open(encoding="utf-8-sig", newline="") as report_file:
+            reported_files = {row.get("pdf_filename", "") for row in csv.DictReader(report_file)}
+    except (OSError, csv.Error):
+        return False
+
+    folder = project_dir / "AdvisoryPDFs"
+    if not folder.is_dir():
+        return False
+    for candidate in folder.glob("*.pdf"):
+        try:
+            if candidate.name in reported_files and sha256(candidate.read_bytes()) == digest:
+                mark_processing(project_dir, digest, candidate.name, "processed")
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def main() -> int:
@@ -151,21 +226,27 @@ def main() -> int:
         pdf_content, final_url = download_pdf(pdf_url)
         if final_url != pdf_url:
             print(f"PDF redirected to: {final_url}")
-        save_latest_pdf(project_dir, final_url, pdf_content)
+        pdf_path, digest = save_latest_pdf(project_dir, final_url, pdf_content)
+        if was_processed(project_dir, pdf_path, digest):
+            print("Latest advisory was already processed successfully; nothing to append.")
+            return 0
+        mark_processing(project_dir, digest, pdf_path.name, "pending")
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError) as error:
         print(f"Could not fetch the latest NDMA advisory: {error}", file=sys.stderr)
         return 1
 
-    print("Running extract_segments.py over the existing and downloaded PDF folders...")
+    print(f"Extracting segments from {pdf_path.name} only...")
     try:
         result = subprocess.run(
-            [sys.executable, str(extractor), "--dirs", "AdvisoryPDFs", "remainingPDFs"],
+            [sys.executable, str(extractor), "--file", str(pdf_path)],
             cwd=project_dir,
             check=False,
         )
     except OSError as error:
         print(f"Could not start extract_segments.py: {error}", file=sys.stderr)
         return 1
+    if result.returncode == 0:
+        mark_processing(project_dir, digest, pdf_path.name, "processed")
     return result.returncode
 
 

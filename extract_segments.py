@@ -209,6 +209,7 @@ def is_fragment_or_header(text):
         return True
     return False
 
+
 def get_weak_label_hint(text):
     """
     Assigns rule-based weak label hint (0=routine, 1=caution/disruption, 2=restriction/blockage).
@@ -709,15 +710,20 @@ def clean_prefix_for_dedup(text):
     t = re.sub(r'^(?:[a-z]\.|\([a-z0-9]+\)|[0-9]+\.|\u2022|[•*➢\-\–]|\([0-9]+\))\s*', '', t, flags=re.IGNORECASE)
     return ' '.join(t.lower().split())
 
-def update_canonical_sheet(all_segments, canonical_csv_path='labeling_canonical.csv'):
+def update_canonical_sheet(
+    all_segments,
+    canonical_csv_path='labeling_canonical.csv',
+    existing_csv_path=None,
+):
     """
     Groups all_segments into canonical deduplicated clusters.
     Preserves existing is_in_kappa_sample flags and human annotations.
     """
     # 1. Load existing canonical rows if file exists
     existing_meta = {}
-    if os.path.exists(canonical_csv_path):
-        with open(canonical_csv_path, encoding='utf-8-sig') as f:
+    metadata_path = existing_csv_path or canonical_csv_path
+    if os.path.exists(metadata_path):
+        with open(metadata_path, encoding='utf-8-sig') as f:
             for row in csv.DictReader(f):
                 norm = clean_prefix_for_dedup(row['segment_text'])
                 existing_meta[norm] = {
@@ -769,10 +775,11 @@ def update_canonical_sheet(all_segments, canonical_csv_path='labeling_canonical.
 
     # Ensure exactly 130 clean rows in the Kappa sample (stratified by weak_label_hint)
     current_kappa = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() == 'true']
-    if len(current_kappa) < 130:
+    target_kappa = min(130, len(canonical_rows))
+    if len(current_kappa) < target_kappa:
         import random
         random.seed(42)
-        needed = 130 - len(current_kappa)
+        needed = target_kappa - len(current_kappa)
         eligible = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() != 'true']
         by_hint = defaultdict(list)
         for r in eligible:
@@ -784,12 +791,12 @@ def update_canonical_sheet(all_segments, canonical_csv_path='labeling_canonical.
                 s['is_in_kappa_sample'] = 'True'
         # Final adjustment if rounding differed
         now_kappa = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() == 'true']
-        if len(now_kappa) < 130:
+        if len(now_kappa) < target_kappa:
             remaining_eligible = [r for r in canonical_rows if str(r['is_in_kappa_sample']).lower() != 'true']
-            for extra in random.sample(remaining_eligible, 130 - len(now_kappa)):
+            for extra in random.sample(remaining_eligible, target_kappa - len(now_kappa)):
                 extra['is_in_kappa_sample'] = 'True'
-        elif len(now_kappa) > 130:
-            excess = len(now_kappa) - 130
+        elif len(now_kappa) > target_kappa:
+            excess = len(now_kappa) - target_kappa
             newly_added = [r for r in now_kappa if r['canonical_segment_id'] not in set(k['canonical_segment_id'] for k in current_kappa)]
             for drop in random.sample(newly_added, excess):
                 drop['is_in_kappa_sample'] = 'False'
@@ -818,7 +825,113 @@ def update_canonical_sheet(all_segments, canonical_csv_path='labeling_canonical.
 
     return canonical_rows
 
-def run_extraction(target_dirs=('AdvisoryPDFs', 'remainingPDFs'), single_file=None):
+SEGMENT_FIELDS = [
+    'segment_id', 'pdf_filename', 'advisory_issue_date', 'hazard_date_range',
+    'section', 'section1_was_image', 'source_method', 'segment_text',
+    'direct_locations', 'implied_locations', 'matched_region', 'location_match_type',
+    'weak_label_hint', 'label', 'annotator_1_label', 'annotator_2_label', 'label_notes'
+]
+REPORT_FIELDS = [
+    'pdf_filename', 'advisory_issue_date', 'hazard_date_range', 'section1_was_image',
+    'total_pages', 'usable_segments_count', 'direct_locations_found',
+    'implied_locations_found', 'status_and_issues'
+]
+
+
+def _read_csv_rows(path, fieldnames):
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding='utf-8-sig', newline='') as csv_file:
+        return [
+            {field: row.get(field, '') for field in fieldnames}
+            for row in csv.DictReader(csv_file)
+        ]
+
+
+def _atomic_write_csv(path, fieldnames, rows):
+    temporary = f'{path}.part'
+    try:
+        with open(temporary, 'w', newline='', encoding='utf-8-sig') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _write_csv(path, fieldnames, rows):
+    with open(path, 'w', newline='', encoding='utf-8-sig') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def run_incremental(single_file):
+    """Extract one successfully downloaded PDF and append its outputs safely."""
+    segs, report = process_single_pdf(single_file)
+    existing_segments = _read_csv_rows('all_segments.csv', SEGMENT_FIELDS)
+    existing_reports = _read_csv_rows('run_report.csv', REPORT_FIELDS)
+    filename = report['pdf_filename']
+
+    # A retry replaces an incomplete prior attempt for this filename, rather
+    # than adding a second copy of its rows.
+    combined_segments = [
+        row for row in existing_segments if row['pdf_filename'] != filename
+    ] + segs
+    combined_reports = [
+        row for row in existing_reports if row['pdf_filename'] != filename
+    ] + [report]
+
+    staged = {
+        'all_segments.csv': 'all_segments.csv.part',
+        'run_report.csv': 'run_report.csv.part',
+        'labeling_canonical.csv': 'labeling_canonical.csv.part',
+    }
+    backups = {}
+    replaced = []
+    try:
+        canonical_rows = update_canonical_sheet(
+            combined_segments,
+            staged['labeling_canonical.csv'],
+            existing_csv_path='labeling_canonical.csv',
+        )
+        _write_csv(staged['all_segments.csv'], SEGMENT_FIELDS, combined_segments)
+        _write_csv(staged['run_report.csv'], REPORT_FIELDS, combined_reports)
+        for target, temporary in staged.items():
+            backup = f'{target}.bak'
+            if os.path.exists(target):
+                os.replace(target, backup)
+                backups[target] = backup
+            os.replace(temporary, target)
+            replaced.append(target)
+        for backup in backups.values():
+            if os.path.exists(backup):
+                os.unlink(backup)
+    except Exception:
+        for target in reversed(replaced):
+            if os.path.exists(target):
+                os.unlink(target)
+        for target, backup in backups.items():
+            if os.path.exists(backup):
+                os.replace(backup, target)
+        raise
+    finally:
+        for temporary in staged.values():
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        for backup in backups.values():
+            if os.path.exists(backup):
+                os.unlink(backup)
+
+    print(f"Successfully appended {len(segs)} segments for {filename}")
+    print(f"Successfully recorded report for {filename}")
+    print(f"Successfully wrote {len(canonical_rows)} canonical clusters to labeling_canonical.csv")
+    return segs, report
+
+
+def run_extraction(target_dirs=('AdvisoryPDFs',), single_file=None):
     """
     Main extraction driver. Can process a single PDF or scan directories.
     """
@@ -862,12 +975,7 @@ def run_extraction(target_dirs=('AdvisoryPDFs', 'remainingPDFs'), single_file=No
 
     # Save all_segments.csv with finalized 17-column schema
     csv_segments = 'all_segments.csv'
-    fieldnames = [
-        'segment_id', 'pdf_filename', 'advisory_issue_date', 'hazard_date_range',
-        'section', 'section1_was_image', 'source_method', 'segment_text',
-        'direct_locations', 'implied_locations', 'matched_region', 'location_match_type',
-        'weak_label_hint', 'label', 'annotator_1_label', 'annotator_2_label', 'label_notes'
-    ]
+    fieldnames = SEGMENT_FIELDS
     with open(csv_segments, 'w', newline='', encoding='utf-8-sig') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=fieldnames)
         writer.writeheader()
@@ -877,11 +985,7 @@ def run_extraction(target_dirs=('AdvisoryPDFs', 'remainingPDFs'), single_file=No
     # Save run_report.csv
     csv_report = 'run_report.csv'
     with open(csv_report, 'w', newline='', encoding='utf-8-sig') as f_out:
-        writer = csv.DictWriter(f_out, fieldnames=[
-            'pdf_filename', 'advisory_issue_date', 'hazard_date_range', 'section1_was_image',
-            'total_pages', 'usable_segments_count', 'direct_locations_found',
-            'implied_locations_found', 'status_and_issues'
-        ])
+        writer = csv.DictWriter(f_out, fieldnames=REPORT_FIELDS)
         writer.writeheader()
         writer.writerows(all_reports)
     print(f"Successfully wrote {len(all_reports)} rows to {csv_report}")
@@ -912,16 +1016,10 @@ def run_extraction(target_dirs=('AdvisoryPDFs', 'remainingPDFs'), single_file=No
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Extract hazard advisory segments from NDMA/PMD PDFs.")
     parser.add_argument('--file', type=str, help="Path to single PDF to process.")
-    parser.add_argument('--dirs', nargs='+', default=['AdvisoryPDFs', 'remainingPDFs'], help="Directories containing PDFs.")
+    parser.add_argument('--dirs', nargs='+', default=['AdvisoryPDFs'], help="Directories containing PDFs.")
     args = parser.parse_args()
 
     if args.file:
-        segs, rep = process_single_pdf(args.file)
-        print(f"\n--- Extracted {len(segs)} segments from {args.file} ---")
-        for i, s in enumerate(segs, 1):
-            print(f"\n[{i}] ID: {s['segment_id']} | Date: {s['hazard_date_range']}")
-            print(f"    Direct: {s['direct_locations']} | Implied: {s['implied_locations']}")
-            print(f"    Region: {s['matched_region']} | Hint: {s['weak_label_hint']}")
-            print(f"    Text: \"{s['segment_text']}\"")
+        run_incremental(args.file)
     else:
         run_extraction(target_dirs=args.dirs)

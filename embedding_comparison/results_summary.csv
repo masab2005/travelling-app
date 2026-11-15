@@ -1,0 +1,4 @@
+model,dimension,encode_time_seconds,parameter_size_mb,macro_f1_mean,macro_f1_std,class2_recall_mean,class2_recall_std,class2_precision_mean,class2_precision_std,class2_f1_mean,class2_f1_std
+all-MiniLM-L6-v2,384,15.812,86.64,0.9666,0.0225,0.9701,0.0344,0.9428,0.0464,0.9555,0.0308
+bge-small-en-v1.5,384,34.559,127.26,0.9560,0.0195,0.9548,0.0337,0.9312,0.0514,0.9417,0.0274
+all-mpnet-base-v2,768,119.217,417.66,0.9586,0.0185,0.9769,0.0247,0.9187,0.0542,0.9456,0.0256
