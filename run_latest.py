@@ -19,6 +19,7 @@ from pathlib import Path
 SITE_URL = "https://ndma.gov.pk/advisories"
 MAX_PDF_BYTES = 40 * 1024 * 1024
 USER_AGENT = "TravellingAppAdvisoryFetcher/1.0 (official NDMA advisories page)"
+LATEST_RESULTS_JSON = "latest_predictions.json"
 
 
 class AdvisoryLinks(html.parser.HTMLParser):
@@ -216,6 +217,7 @@ def was_processed(project_dir: Path, pdf_path: Path, digest: str) -> bool:
 def main() -> int:
     project_dir = Path(__file__).resolve().parent
     extractor = project_dir / "extract_segments.py"
+    results_path = project_dir / LATEST_RESULTS_JSON
     if not extractor.is_file():
         print(f"Extractor was not found: {extractor}", file=sys.stderr)
         return 1
@@ -226,8 +228,13 @@ def main() -> int:
         pdf_content, final_url = download_pdf(pdf_url)
         if final_url != pdf_url:
             print(f"PDF redirected to: {final_url}")
+        existing_copy = find_existing_copy(project_dir, sha256(pdf_content))
         pdf_path, digest = save_latest_pdf(project_dir, final_url, pdf_content)
-        if was_processed(project_dir, pdf_path, digest):
+        if (
+            existing_copy is not None
+            and results_path.is_file()
+            and was_processed(project_dir, pdf_path, digest)
+        ):
             print("Latest advisory was already processed successfully; nothing to append.")
             return 0
         mark_processing(project_dir, digest, pdf_path.name, "pending")
@@ -235,19 +242,72 @@ def main() -> int:
         print(f"Could not fetch the latest NDMA advisory: {error}", file=sys.stderr)
         return 1
 
-    print(f"Extracting segments from {pdf_path.name} only...")
+    print(f"Extracting and classifying segments from {pdf_path.name} only...")
+    temporary_segments = project_dir / "latest_segments.json.part"
     try:
         result = subprocess.run(
-            [sys.executable, str(extractor), "--file", str(pdf_path)],
+            [
+                sys.executable,
+                str(extractor),
+                "--file",
+                str(pdf_path),
+                "--json-output",
+                str(temporary_segments),
+            ],
             cwd=project_dir,
             check=False,
         )
     except OSError as error:
         print(f"Could not start extract_segments.py: {error}", file=sys.stderr)
         return 1
-    if result.returncode == 0:
+    if result.returncode != 0:
+        if temporary_segments.exists():
+            temporary_segments.unlink()
+        return result.returncode
+
+    try:
+        with temporary_segments.open(encoding="utf-8") as segments_file:
+            extracted = json.load(segments_file)
+        from severity_classifier.predict_severity import predict
+
+        segments = extracted.get("segments", [])
+        predictions = predict([segment["segment_text"] for segment in segments])
+        for segment, prediction in zip(segments, predictions):
+            segment.update(
+                predicted_label=prediction["label"],
+                class2_probability=prediction["class2_probability"],
+                uncertain=prediction["uncertain"],
+            )
+        output = {
+            "pdf_report": extracted.get("pdf_report", {}),
+            "model": "severity_classifier/severity_model.joblib",
+            "segments": segments,
+        }
+        temporary_results = results_path.with_suffix(".json.part")
+        with temporary_results.open("w", encoding="utf-8") as results_file:
+            json.dump(output, results_file, ensure_ascii=False, indent=2)
+        os.replace(temporary_results, results_path)
         mark_processing(project_dir, digest, pdf_path.name, "processed")
-    return result.returncode
+        print(f"Successfully classified {len(segments)} segments.")
+        print(f"Results overwritten: {results_path.name}")
+        return 0
+    except (
+        OSError,
+        ImportError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        json.JSONDecodeError,
+    ) as error:
+        print(f"Could not classify the extracted segments: {error}", file=sys.stderr)
+        return 1
+    finally:
+        if temporary_segments.exists():
+            temporary_segments.unlink()
+        temporary_results = results_path.with_suffix(".json.part")
+        if temporary_results.exists():
+            temporary_results.unlink()
 
 
 if __name__ == "__main__":
